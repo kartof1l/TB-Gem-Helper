@@ -1,0 +1,22 @@
+.gem-badge {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    font-size: 10px; /* Чуть уменьшили шрифт */
+    font-weight: 900;
+    padding: 2px 4px;
+    border-radius: 3px;
+    z-index: 100;
+    text-shadow: 1px 1px 1px rgba(0,0,0,0.9);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+    border: 1px solid #fff;
+    font-family: Arial, sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    text-align: center;
+    line-height: 1.1;
+    max-width: 100px; /* Ограничиваем ширину */
+    white-space: nowrap; /* Запрещаем перенос строк */
+    overflow: hidden; /* Скрываем лишнее */
+    text-overflow: ellipsis; /* Добавляем троеточие (...) */
+}
