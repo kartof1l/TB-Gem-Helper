@@ -1,4 +1,4 @@
-// content.js - TB Gem Helper v3.6 (fuzzy-матч, длинный кэш, фоновый автопроход страниц)
+// content.js - TB Gem Helper v4.0 (button-пагинация, URL-проба + iframe-walker, новая панель)
 (function () {
   'use strict';
 
@@ -42,21 +42,24 @@
   var TARGET_RE = /Fractal Horns of Inner Abysm|Prismatic\s*:|Призматический\s*:/i;
   var IMG_SEL = '.image, .img, .item-image, [style*="background-image"], img';
   var CYR = /[\u0430-\u044f]/;
+  var NEXT_RE = /следующая\s*страница|next\s*page/i;
 
   var CACHE_KEY = 'tbGemCacheV3', SET_KEY = 'tbGemSettings';
   var TTL_GOOD = 90*24*3600*1000, TTL_EMPTY = 6*3600*1000, TTL_UNK = 24*3600*1000, CACHE_MAX = 8000;
   var LIMITS = { wMin:1, wMax:3, dMin:250, dMax:3000, maxRate:3.5, netMs:350, pMax:20, bgMax:600 };
+  var PARAMS = ['p','page','pg','page_num','start'];
 
-  var settings = { workers:2, delay:350, ru:false, panel:true, prefetch:true, prefetchPages:2 };
+  var settings = { workers:2, delay:350, ru:false, panel:true, prefetch:true, prefetchPages:2, pageParam:null, open:false };
   var cache = {}, queue = [], bgQueue = [], active = 0, done = 0, bgDone = 0, okStreak = 0;
   var pausedUntil = 0, brake = false, userPaused = false, saveTimer = null;
-  var prefetchRunning = false, prefetchTimer = null, prefetchPage = 0, bgSeen = {};
+  var prefetchRunning = false, prefetchPage = 0, bgSeen = {}, idleSince = 0, lastReason = '';
+  var pageInfo = { current:1, total:0 }, focusGem = null, legendSig = '';
 
   function compact(s) { return (s||'').toLowerCase().replace(/\u0451/g,'\u0435').replace(/[^a-z0-9\u0430-\u044f]/g,''); }
   var INDEX = (function () {
     var seen = {}, list = [];
     function add(alias, canon) {
-      if (!GEM_COLORS[canon]) { console.warn('[gems] алиас без цвета отброшен:', alias, '->', canon); return; }
+      if (!GEM_COLORS[canon]) return;
       var k = compact(alias); if (!k || seen[k]) return;
       seen[k] = 1; list.push({ k:k, n:canon });
     }
@@ -66,11 +69,11 @@
     return list;
   })();
   var FUZZY = INDEX.filter(function (e) { return CYR.test(e.k) && e.k.length >= 7; })
-                   .map(function (e) { return { stem: e.k.slice(0, -2), n: e.n }; });
+                   .map(function (e) { return { stem:e.k.slice(0,-2), n:e.n }; });
   var RU_BY_EN = {};
   Object.keys(RU_ALIASES).forEach(function (ru) { var c = RU_ALIASES[ru]; if (GEM_COLORS[c] && !RU_BY_EN[c]) RU_BY_EN[c] = ru; });
 
-  function hex2(n) { return ('0' + Math.max(0, Math.min(255, n|0)).toString(16)).slice(-2); }
+  function hex2(n) { return ('0'+Math.max(0,Math.min(255,n|0)).toString(16)).slice(-2); }
   function toHex(raw) {
     if (!raw) return null; raw = String(raw).trim();
     var m = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
@@ -92,7 +95,11 @@
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function keyOf(u) { var m = (u||'').match(/\/item\/(\d+)-(\d+)/); return m ? m[1]+'_'+m[2] : u; }
   function has(k) { return Object.prototype.hasOwnProperty.call(cache, k); }
-  function abs(href, base) { try { return new URL(href, base || location.href).href.split('#')[0]; } catch (e) { return null; } }
+  function abs(href, base) {
+    if (!href || /^(#|javascript:)/i.test(String(href).trim())) return null;
+    try { return new URL(href, base || location.href).href.split('#')[0]; } catch (e) { return null; }
+  }
+  function sig(list) { return list.map(keyOf).sort().join('|'); }
 
   function clamp(s) {
     var w = Math.max(LIMITS.wMin, Math.min(LIMITS.wMax, Math.round(s.workers||2)));
@@ -100,7 +107,8 @@
     var need = Math.ceil(w*1000/LIMITS.maxRate - LIMITS.netMs);
     if (d < need) d = need;
     var p = Math.max(0, Math.min(10, Math.round(s.prefetchPages == null ? 2 : s.prefetchPages)));
-    return { workers:w, delay:d, ru:!!s.ru, panel:s.panel!==false, prefetch:s.prefetch!==false, prefetchPages:p };
+    return { workers:w, delay:d, ru:!!s.ru, panel:s.panel!==false, prefetch:s.prefetch!==false,
+             prefetchPages:p, pageParam:s.pageParam||null, open:!!s.open };
   }
   function effWorkers() { return brake ? 1 : settings.workers; }
   function effDelay() { return brake ? Math.min(LIMITS.dMax, settings.delay*2) : settings.delay; }
@@ -121,8 +129,7 @@
     Object.keys(cache).forEach(function (k) {
       var v = cache[k];
       if (!v || !v.t) { delete cache[k]; return; }
-      var ttl = v.n ? (v.u ? TTL_UNK : TTL_GOOD) : TTL_EMPTY;
-      if (now - v.t > ttl) delete cache[k];
+      if (now - v.t > (v.n ? (v.u ? TTL_UNK : TTL_GOOD) : TTL_EMPTY)) delete cache[k];
     });
   }
   function persist() {
@@ -131,7 +138,7 @@
       var keys = Object.keys(cache);
       if (keys.length > CACHE_MAX) {
         keys.sort(function (a,b) { return cache[a].t - cache[b].t; });
-        keys.slice(0, keys.length - CACHE_MAX).forEach(function (k) { delete cache[k]; });
+        keys.slice(0, keys.length-CACHE_MAX).forEach(function (k) { delete cache[k]; });
       }
       try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
@@ -153,22 +160,18 @@
       for (var i=0;i<INDEX.length;i++) if (head.slice(-INDEX[i].k.length) === INDEX[i].k) return INDEX[i].n;
       for (var f=0;f<FUZZY.length;f++) {
         var st = FUZZY[f].stem;
-        for (var x=0;x<3;x++) {
-          var cut = x ? head.slice(0, head.length-x) : head;
-          if (cut.slice(-st.length) === st) return FUZZY[f].n;
-        }
+        for (var x=0;x<3;x++) { var cut = x ? head.slice(0, head.length-x) : head; if (cut.slice(-st.length) === st) return FUZZY[f].n; }
       }
     }
     var m2 = t.match(/(?:Prismatic|Призматический)\s*:\s*([^\n]{2,40})/i);
-    if (m2) { var tail = compact(m2[1]);
-      for (var j=0;j<INDEX.length;j++) if (tail.indexOf(INDEX[j].k) === 0) return INDEX[j].n; }
+    if (m2) { var tail = compact(m2[1]); for (var j=0;j<INDEX.length;j++) if (tail.indexOf(INDEX[j].k) === 0) return INDEX[j].n; }
     return null;
   }
   function htmlColorFor(descr, name) {
     var needle = compact(name), els = descr.querySelectorAll('font[color], [style*="color"]');
     for (var i=0;i<els.length;i++) {
       var t = compact(els[i].textContent); if (t.length < 3) continue;
-      if (t.indexOf(needle) !== -1 || needle.indexOf(t) !== -1) { var c = readColor(els[i]); if (c) return c; }
+      if (t.indexOf(needle)!==-1 || needle.indexOf(t)!==-1) { var c = readColor(els[i]); if (c) return c; }
     }
     return null;
   }
@@ -246,13 +249,21 @@
     var href = decodeURIComponent(el.dataset.gemUrl||'').replace(/\+/g,' ');
     return TARGET_RE.test(el.textContent||'') || TARGET_RE.test(href);
   }
+  function currentLinks() { return findCards().filter(isTarget).map(function (el) { return el.dataset.gemUrl; }); }
   function fromCache(v) { return v && v.n ? { name:v.n, color:v.c, unknown:!!v.u } : null; }
+  function applyFocus() {
+    findCards().forEach(function (el) {
+      var v = cache[keyOf(el.dataset.gemUrl)];
+      var on = focusGem && (!v || v.n !== focusGem);
+      el.classList.toggle('gem-dim', !!on);
+    });
+  }
   function logGem(gem, url, bg) {
     var tag = bg ? '[gems][фон] ' : '[gems] ';
-    if (!gem) { console.log(tag + 'без гема | ' + url); return; }
-    if (gem.unknown) console.warn(tag + 'НЕИЗВЕСТНЫЙ "' + gem.name + '" | ' + url);
-    console.log(tag + '%c ' + gem.name + ' %c ' + url,
-      'background:'+gem.color+';color:'+textColor(gem.color)+';font-weight:700;padding:1px 5px;border-radius:3px', 'color:#888');
+    if (!gem) { console.log(tag+'без гема | '+url); return; }
+    if (gem.unknown) console.warn(tag+'НЕИЗВЕСТНЫЙ "'+gem.name+'" | '+url);
+    console.log(tag+'%c '+gem.name+' %c '+url,
+      'background:'+gem.color+';color:'+textColor(gem.color)+';font-weight:700;padding:1px 5px;border-radius:3px','color:#888');
   }
 
   async function fetchDoc(url) {
@@ -263,41 +274,72 @@
     if (!res.ok) throw new Error('HTTP '+res.status);
     return new DOMParser().parseFromString(await res.text(), 'text/html');
   }
-
+  function descrOf(doc) { return doc.querySelector('#descr') || doc.querySelector('[class*="descr"]') || doc.body; }
   function itemLinksFromDoc(doc, base) {
     var out = [], seen = {}, nodes = doc.querySelectorAll('a.item, .market-items .item, a[href*="/item/"]');
     for (var i=0;i<nodes.length;i++) {
-      var el = nodes[i];
-      var raw = (el.tagName==='A' && /\/item\//.test(el.getAttribute('href')||'')) ? el.getAttribute('href')
-                : (el.querySelector('a[href*="/item/"]') || {}).getAttribute ? el.querySelector('a[href*="/item/"]').getAttribute('href') : null;
-      if (!raw) continue;
-      var href = abs(raw, base); if (!href || seen[href]) continue;
+      var el = nodes[i], inner = el.querySelector('a[href*="/item/"]');
+      var raw = (el.tagName==='A' && /\/item\//.test(el.getAttribute('href')||'')) ? el.getAttribute('href') : (inner ? inner.getAttribute('href') : null);
+      var href = abs(raw, base);
+      if (!href || seen[href]) continue;
       seen[href] = 1;
-      var name = (el.textContent||'') + ' ' + decodeURIComponent(href).replace(/\+/g,' ');
+      var name = (el.textContent||'')+' '+decodeURIComponent(href).replace(/\+/g,' ');
       if (TARGET_RE.test(name)) out.push(href);
     }
     return out;
   }
-  function pageNum(u) { var m = (u||'').match(/[?&](?:page|p)=(\d+)/i) || (u||'').match(/\/page\/(\d+)/i); return m ? +m[1] : null; }
-  function nextPageUrl(doc, base) {
-    var a = doc.querySelector('a[rel="next"]');
-    if (a && a.getAttribute('href')) return abs(a.getAttribute('href'), base);
-    var links = doc.querySelectorAll('a[href]'), arrow = null, cur = pageNum(base || location.href) || 1;
-    for (var i=0;i<links.length;i++) {
-      var el = links[i], t = (el.textContent||'').trim().toLowerCase(), href = el.getAttribute('href');
-      if (!href) continue;
-      var meta = ((el.getAttribute('title')||'')+' '+(el.className||'')).toLowerCase();
-      if (/next\s*page|следующ|вперёд|вперед/.test(t) || /\bnext\b/.test(meta)) return abs(href, base);
-      if (pageNum(abs(href, base)) === cur+1) return abs(href, base);
-      if (/^(\u2192|\u00bb|\u203a|>)$/.test(t) && !arrow) arrow = abs(href, base);
+
+  function readPageInfo(doc) {
+    var cur = 0, total = 0, el = doc.querySelector('.page-counter');
+    if (el) {
+      var inp = el.querySelector('input');
+      if (inp && inp.value) cur = parseInt(inp.value, 10) || 0;
+      var nums = (el.textContent||'').match(/\d+/g);
+      if (nums) {
+        if (!cur) cur = parseInt(nums[0], 10) || 0;
+        total = parseInt(nums[nums.length-1], 10) || 0;
+      }
     }
-    return arrow;
+    if (!cur) { var m = location.search.match(/[?&](?:p|page|pg|page_num)=(\d+)/i); cur = m ? +m[1] : 1; }
+    return { current: cur || 1, total: total };
+  }
+  function nextButton(doc) {
+    var b = doc.querySelector('.page-switcher-r');
+    if (!b) {
+      var all = doc.querySelectorAll('button, a');
+      for (var i=0;i<all.length;i++) if (NEXT_RE.test((all[i].textContent||'').trim())) { b = all[i]; break; }
+    }
+    if (!b || b.disabled || /disabled/.test(String(b.className||''))) return null;
+    return b;
+  }
+  function anchorNext(doc, base) {
+    var here = (base||location.href).split('#')[0];
+    var a = doc.querySelector('a[rel="next"]');
+    if (a) { var u0 = abs(a.getAttribute('href'), base); if (u0 && u0 !== here) return u0; }
+    var links = doc.querySelectorAll('a[href]');
+    for (var i=0;i<links.length;i++) {
+      var el = links[i], t = (el.textContent||'').trim().toLowerCase();
+      var u = abs(el.getAttribute('href'), base);
+      if (!u || u === here) continue;
+      if (NEXT_RE.test(t) || /\bnext\b/.test(String(el.className||'').toLowerCase())) return u;
+    }
+    return null;
+  }
+  function hasPagination() { return !!(anchorNext(document, location.href) || nextButton(document) || document.querySelector('.page-counter')); }
+  function candidateUrl(base, name, n) {
+    try {
+      var u = new URL(base);
+      var per = findCards().length || 65;
+      u.searchParams.set(name, String(name === 'start' ? (n-1)*per : n));
+      u.hash = '';
+      return u.href;
+    } catch (e) { return null; }
   }
 
   function pump() {
     if (userPaused) return;
     while (active < effWorkers() && (queue.length || (settings.prefetch && !brake && bgQueue.length)) && Date.now() >= pausedUntil) { active++; runWorker(); }
-    if ((queue.length || bgQueue.length) && Date.now() < pausedUntil) setTimeout(pump, pausedUntil - Date.now() + 200);
+    if ((queue.length || bgQueue.length) && Date.now() < pausedUntil) setTimeout(pump, pausedUntil-Date.now()+200);
   }
   async function runWorker() {
     try {
@@ -310,95 +352,232 @@
         var url = isBg ? task : (task && task.isConnected ? task.dataset.gemUrl : null);
         if (!url) continue;
         var key = keyOf(url);
-        if (has(key)) { if (!isBg) { addBadge(task, fromCache(cache[key])); task.dataset.gemState = 'done'; } continue; }
-        await sleep(effDelay() * (isBg ? 1.5 : 1) + Math.random()*200);
+        if (has(key)) { if (!isBg) { addBadge(task, fromCache(cache[key])); task.dataset.gemState='done'; } continue; }
+        await sleep(effDelay()*(isBg?1.5:1) + Math.random()*200);
         var gem = null;
-        try { gem = extractGem((await fetchDoc(url)).querySelector('#descr') || document.createElement('div')); }
+        try { gem = extractGem(descrOf(await fetchDoc(url))); }
         catch (err) {
           if (err.rate) {
             if (isBg) bgQueue.unshift(task); else queue.unshift(task);
-            pausedUntil = Date.now() + 45000; brake = true; okStreak = 0;
-            console.warn('[gems] лимит (' + err.message + ') - пауза 45с, тормоз');
+            pausedUntil = Date.now()+45000; brake = true; okStreak = 0;
+            console.warn('[gems] лимит ('+err.message+') - пауза 45с');
             break;
           }
-          console.warn('[gems] ошибка ' + err.message + ' | ' + url);
+          console.warn('[gems] ошибка '+err.message+' | '+url);
           if (!isBg) task.dataset.gemState = 'error';
           continue;
         }
         cache[key] = { n:gem?gem.name:null, c:gem?gem.color:null, u:gem&&gem.unknown?1:0, t:Date.now() };
         persist();
-        if (isBg) bgDone++; else { done++; addBadge(task, gem); task.dataset.gemState = 'done'; }
+        if (isBg) bgDone++; else { done++; addBadge(task, gem); task.dataset.gemState='done'; }
         logGem(gem, url, isBg);
         okStreak++;
         if (brake && okStreak >= 25) { brake = false; console.log('[gems] тормоз снят'); }
       }
-    } finally {
-      active--;
-      if (queue.length || bgQueue.length) pump(); else maybePrefetch();
+    } finally { active--; if (queue.length || bgQueue.length) pump(); paintPanel(); }
+  }
+
+  function enqueueBg(links) {
+    var added = 0;
+    links.forEach(function (u) { var k = keyOf(u); if (!has(k) && !bgSeen[k]) { bgSeen[k]=1; bgQueue.push(u); added++; } });
+    pump();
+    return added;
+  }
+  async function waitUser() { var g=0; while (queue.length && g<600 && settings.prefetch) { await sleep(500); g++; } }
+  async function drainBg() { var g=0; while (bgQueue.length>60 && g<600 && settings.prefetch && !userPaused) { await sleep(1000); g++; } }
+  function limitPages() { return settings.prefetchPages === 0 ? LIMITS.pMax : Math.min(settings.prefetchPages, LIMITS.pMax); }
+  function canContinue(made) { return made < limitPages() && settings.prefetch && !userPaused && bgDone < LIMITS.bgMax; }
+
+  async function discoverParam() {
+    if (settings.pageParam) return settings.pageParam;
+    var here = sig(currentLinks());
+    if (!here) return null;
+    for (var i=0;i<PARAMS.length;i++) {
+      var name = PARAMS[i];
+      var u1 = candidateUrl(location.href, name, pageInfo.current);
+      var u2 = candidateUrl(location.href, name, pageInfo.current+1);
+      if (!u1 || !u2) continue;
+      try {
+        await sleep(effDelay());
+        var k1 = sig(itemLinksFromDoc(await fetchDoc(u1), u1));
+        if (!k1 || k1 !== here) continue;
+        await sleep(effDelay());
+        var k2 = sig(itemLinksFromDoc(await fetchDoc(u2), u2));
+        if (k2 && k2 !== here) {
+          settings.pageParam = name; persist();
+          console.log('[gems][фон] параметр страниц найден: ?'+name+'=N');
+          return name;
+        }
+      } catch (e) { if (e.rate) { pausedUntil = Date.now()+45000; brake = true; return null; } }
+    }
+    console.log('[gems][фон] URL-параметр не подошёл - включаю скрытый iframe');
+    return null;
+  }
+
+  async function crawlByParam(name) {
+    var made = 0, page = pageInfo.current, here = sig(currentLinks());
+    while (canContinue(made)) {
+      page++;
+      if (pageInfo.total && page > pageInfo.total) { console.log('[gems][фон] последняя страница ('+pageInfo.total+') достигнута'); break; }
+      await waitUser();
+      if (brake) await sleep(20000);
+      await sleep(effDelay()*1.5);
+      var url = candidateUrl(location.href, name, page), doc;
+      try { doc = await fetchDoc(url); }
+      catch (e) { if (e.rate) { pausedUntil=Date.now()+45000; brake=true; } console.warn('[gems][фон] '+e.message); break; }
+      var links = itemLinksFromDoc(doc, url);
+      if (!links.length) { console.log('[gems][фон] лотов больше нет - финиш'); break; }
+      if (sig(links) === here) { console.warn('[gems][фон] страница повторяет текущую - стоп'); break; }
+      var added = enqueueBg(links);
+      made++; prefetchPage = page;
+      console.log('[gems][фон] стр. '+page+(pageInfo.total?'/'+pageInfo.total:'')+' | новых лотов '+added+' | '+url);
       paintPanel();
+      await drainBg();
     }
   }
 
-  function maybePrefetch() {
-    if (!settings.prefetch || prefetchRunning || userPaused || queue.length || active > 0) return;
-    clearTimeout(prefetchTimer);
-    prefetchTimer = setTimeout(startPrefetch, 2500);
+  function frameLoad(fr, ms) {
+    return new Promise(function (res) {
+      var fin = false;
+      function done(v) { if (!fin) { fin = true; res(v); } }
+      fr.addEventListener('load', function () { setTimeout(function () { done(true); }, 900); }, { once:true });
+      setTimeout(function () { done(false); }, ms||25000);
+    });
   }
-  async function startPrefetch() {
-    if (prefetchRunning || !settings.prefetch || userPaused || queue.length) return;
-    var url = nextPageUrl(document, location.href);
-    if (!url) { console.log('[gems][фон] следующей страницы нет - финиш'); return; }
-    prefetchRunning = true;
-    var limit = settings.prefetchPages === 0 ? LIMITS.pMax : Math.min(settings.prefetchPages, LIMITS.pMax);
-    var visited = {}; visited[location.href.split('#')[0]] = 1;
-    var firstKeyHere = (findCards()[0] || {}).dataset ? keyOf(findCards()[0].dataset.gemUrl) : null;
+  function frameKey(fr) {
     try {
-      while (url && prefetchPage < limit && settings.prefetch && !userPaused && bgDone < LIMITS.bgMax) {
-        if (visited[url]) break;
-        visited[url] = 1;
-        var guard = 0;
-        while (queue.length && guard < 600) { await sleep(500); guard++; }
+      var d = fr.contentDocument; if (!d) return null;
+      var a = d.querySelector('.market-items a[href*="/item/"], a.item[href*="/item/"], a[href*="/item/"]');
+      return a ? a.getAttribute('href') : null;
+    } catch (e) { return null; }
+  }
+  async function frameChanged(fr, before) {
+    var t0 = Date.now();
+    while (Date.now()-t0 < 20000) {
+      await sleep(300);
+      var k = frameKey(fr);
+      if (k && k !== before) return true;
+    }
+    return false;
+  }
+  async function crawlByIframe() {
+    var fr = document.createElement('iframe');
+    fr.className = 'gem-frame'; fr.setAttribute('aria-hidden','true'); fr.src = location.href;
+    document.body.appendChild(fr);
+    console.log('[gems][фон] скрытый iframe запущен');
+    try {
+      if (!await frameLoad(fr)) { console.warn('[gems][фон] iframe не загрузился'); return; }
+      var guard = 0;
+      while (guard < 30 && settings.prefetch && !userPaused) {
+        var d0 = fr.contentDocument; if (!d0) break;
+        if (readPageInfo(d0).current >= pageInfo.current) break;
+        var b0 = nextButton(d0); if (!b0) break;
+        var k0 = frameKey(fr); b0.click();
+        if (!await frameChanged(fr, k0)) break;
+        guard++;
+      }
+      var made = 0;
+      while (canContinue(made)) {
+        await waitUser();
         if (brake) await sleep(20000);
         await sleep(effDelay()*1.5);
-        var doc;
-        try { doc = await fetchDoc(url); }
-        catch (e) { if (e.rate) { pausedUntil = Date.now()+45000; brake = true; } console.warn('[gems][фон] ' + e.message + ' | ' + url); break; }
-        var links = itemLinksFromDoc(doc, url);
-        if (!links.length) { console.log('[gems][фон] на странице нет нужных лотов - стоп'); break; }
-        if (firstKeyHere && keyOf(links[0]) === firstKeyHere) { console.warn('[gems][фон] страница повторяется - стоп'); break; }
-        var added = 0;
-        links.forEach(function (u) { var k = keyOf(u); if (!has(k) && !bgSeen[k]) { bgSeen[k] = 1; bgQueue.push(u); added++; } });
-        prefetchPage++;
-        console.log('[gems][фон] стр. ' + prefetchPage + ' разобрана | новых лотов ' + added + ' | ' + url);
-        pump();
-        var w = 0;
-        while (bgQueue.length > 60 && w < 600 && settings.prefetch) { await sleep(1000); w++; }
-        url = nextPageUrl(doc, url);
+        var d = fr.contentDocument; if (!d) break;
+        var btn = nextButton(d);
+        if (!btn) { console.log('[gems][фон] кнопки «дальше» нет - финиш'); break; }
+        var before = frameKey(fr);
+        btn.click();
+        if (!await frameChanged(fr, before)) { console.warn('[gems][фон] страница в iframe не сменилась'); break; }
+        var nd = fr.contentDocument, nurl = fr.contentWindow.location.href;
+        var links = itemLinksFromDoc(nd, nurl);
+        if (!links.length) { console.log('[gems][фон] лотов больше нет - финиш'); break; }
+        var added = enqueueBg(links);
+        made++; prefetchPage = readPageInfo(nd).current;
+        console.log('[gems][фон] стр. '+prefetchPage+(pageInfo.total?'/'+pageInfo.total:'')+' | новых лотов '+added+' | '+nurl);
+        paintPanel();
+        await drainBg();
       }
-    } finally { prefetchRunning = false; paintPanel(); maybePrefetch(); }
+    } catch (e) { console.warn('[gems][фон] iframe: '+e.message); }
+    finally { fr.remove(); console.log('[gems][фон] iframe закрыт'); }
+  }
+
+  async function crawlAnchors(url) {
+    var made = 0, visited = {}; visited[location.href.split('#')[0]] = 1;
+    var here = sig(currentLinks());
+    while (url && canContinue(made)) {
+      if (visited[url]) break;
+      visited[url] = 1;
+      await waitUser();
+      await sleep(effDelay()*1.5);
+      var doc;
+      try { doc = await fetchDoc(url); } catch (e) { if (e.rate) { pausedUntil=Date.now()+45000; brake=true; } break; }
+      var links = itemLinksFromDoc(doc, url);
+      if (!links.length || sig(links) === here) break;
+      var added = enqueueBg(links);
+      made++; prefetchPage++;
+      console.log('[gems][фон] стр. '+prefetchPage+' | новых лотов '+added+' | '+url);
+      paintPanel();
+      await drainBg();
+      url = anchorNext(doc, url);
+    }
+  }
+
+  function blockReason() {
+    if (prefetchRunning) return 'уже идёт';
+    if (!settings.prefetch) return 'автопроход выключен';
+    if (userPaused) return 'пауза';
+    if (queue.length) return 'занят страницей ('+queue.length+')';
+    if (active > 0) return 'воркеры заняты ('+active+')';
+    if (bgDone >= LIMITS.bgMax) return 'лимит запросов за сессию';
+    if (!hasPagination()) return 'на странице нет пагинации';
+    if (!currentLinks().length) return 'на странице нет аркан ТБ';
+    return null;
+  }
+  async function startPrefetch() {
+    var why = blockReason();
+    if (why) { if (why !== lastReason) { console.log('[gems][фон] не стартую: '+why); lastReason = why; } return; }
+    lastReason = ''; prefetchRunning = true; paintPanel();
+    console.log('[gems][фон] СТАРТ (страница '+pageInfo.current+(pageInfo.total?' из '+pageInfo.total:'')+')');
+    try {
+      var a = anchorNext(document, location.href);
+      if (a) await crawlAnchors(a);
+      else {
+        var name = await discoverParam();
+        if (name) await crawlByParam(name);
+        else await crawlByIframe();
+      }
+    } catch (e) { console.warn('[gems][фон] '+e.message); }
+    finally { prefetchRunning = false; idleSince = 0; paintPanel(); }
+  }
+  function bgNow() {
+    settings.prefetch = true; persist();
+    var why = blockReason();
+    if (why && why !== 'автопроход выключен') return 'не могу: '+why;
+    startPrefetch();
+    return 'запускаю фон';
   }
 
   function processPage() {
+    pageInfo = readPageInfo(document);
     var descr = document.querySelector('#descr');
     if (descr) { var g = extractGem(descr), pic = document.querySelector('.ip-pic'); if (g && pic) addBadge(pic, g); }
     var front = [], back = [], cached = 0, vh = window.innerHeight || 800, cards = findCards();
     cards.forEach(function (el) {
       if (el.dataset.gemState) return;
-      if (!isTarget(el)) { el.dataset.gemState = 'skip'; return; }
+      if (!isTarget(el)) { el.dataset.gemState='skip'; return; }
       var key = keyOf(el.dataset.gemUrl);
-      if (has(key)) { addBadge(el, fromCache(cache[key])); el.dataset.gemState = 'done'; cached++; return; }
+      if (has(key)) { addBadge(el, fromCache(cache[key])); el.dataset.gemState='done'; cached++; return; }
       el.dataset.gemState = 'queued';
       if (el.getBoundingClientRect().top < vh) front.push(el); else back.push(el);
     });
-    if (front.length || back.length) queue = front.concat(queue, back);
+    if (front.length || back.length) { queue = front.concat(queue, back); idleSince = 0; }
     if (cached || front.length || back.length)
-      console.log('[gems] карточек ' + cards.length + ' | из кэша ' + cached + ' | в очередь ' + (front.length+back.length) + ' | ~' + rate() + ' зап/с');
-    pump(); maybePrefetch();
+      console.log('[gems] карточек '+cards.length+' | из кэша '+cached+' | в очередь '+(front.length+back.length)+' | ~'+rate()+' зап/с');
+    pump(); applyFocus();
   }
   function refreshBadges() {
     document.querySelectorAll('.gem-badge').forEach(function (b) { b.remove(); });
     document.querySelectorAll('[data-gem-state]').forEach(function (el) { delete el.dataset.gemState; });
-    queue = []; done = 0; processPage();
+    queue = []; done = 0; legendSig = ''; processPage();
   }
   function report() {
     var rows = [];
@@ -406,7 +585,23 @@
       var v = cache[keyOf(el.dataset.gemUrl)];
       rows.push({ gem: v ? (v.n || 'без гема') : 'не обработан', url: el.dataset.gemUrl });
     });
-    console.table(rows); return rows.length + ' строк';
+    console.table(rows); return rows.length+' строк';
+  }
+  function exportCsv() {
+    var rows = [['gem','gem_ru','price','url']];
+    findCards().forEach(function (el) {
+      var v = cache[keyOf(el.dataset.gemUrl)];
+      var m = (el.textContent||'').match(/\d[\d\s.,]*/);
+      rows.push([v && v.n ? v.n : '', v && v.n && RU_BY_EN[v.n] ? RU_BY_EN[v.n] : '', m ? m[0].trim() : '', el.dataset.gemUrl]);
+    });
+    var csv = rows.map(function (r) { return r.map(function (c) { return '"'+String(c).replace(/"/g,'""')+'"'; }).join(';'); }).join('\r\n');
+    var blob = new Blob(['\ufeff'+csv], { type:'text/csv;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'tb-gems-page-'+pageInfo.current+'.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+    return (rows.length-1)+' строк выгружено';
   }
   function setSpeed(w, d) {
     if (typeof w === 'string') {
@@ -417,62 +612,133 @@
     if (typeof w === 'number') settings.workers = w;
     if (typeof d === 'number') settings.delay = d;
     settings = clamp(settings); persist(); pump(); paintPanel();
-    return 'потоков ' + settings.workers + ', пауза ' + settings.delay + ' мс, ~' + rate() + ' зап/с (потолок ' + LIMITS.maxRate + ')';
+    return 'потоков '+settings.workers+', пауза '+settings.delay+' мс, ~'+rate()+' зап/с';
   }
   function setPrefetch(on, pages) {
     if (typeof on === 'boolean') settings.prefetch = on;
     if (typeof pages === 'number') settings.prefetchPages = pages;
-    settings = clamp(settings); persist(); paintPanel();
-    if (settings.prefetch) { pump(); maybePrefetch(); } else { bgQueue = []; }
-    return 'автопроход: ' + (settings.prefetch ? 'вкл' : 'выкл') + ', страниц вперёд: ' + (settings.prefetchPages || 'все (до ' + LIMITS.pMax + ')');
+    settings = clamp(settings); persist(); idleSince = 0; paintPanel();
+    if (settings.prefetch) pump(); else bgQueue = [];
+    return 'автопроход: '+(settings.prefetch?'вкл':'выкл')+', вперёд: '+(settings.prefetchPages||'все');
+  }
+  function diag() {
+    var d = { version:'v4.0', url:location.href, page:pageInfo, settings:settings,
+      cards:findCards().length, targets:currentLinks().length, badges:document.querySelectorAll('.gem-badge').length,
+      queue:queue.length, active:active, bgQueue:bgQueue.length, bgDone:bgDone, bgPage:prefetchPage,
+      running:prefetchRunning, brake:brake, paused:userPaused, cache:Object.keys(cache).length,
+      nextButton:!!nextButton(document), anchorNext:anchorNext(document, location.href),
+      block:blockReason(), focus:focusGem };
+    console.log('[gems] diag', d);
+    return d;
   }
 
   var panel = null;
+  function q(s) { return panel ? panel.querySelector(s) : null; }
+  function buildLegend() {
+    var box = q('#gpLegend'); if (!box) return;
+    var counts = {};
+    findCards().forEach(function (el) {
+      var v = cache[keyOf(el.dataset.gemUrl)];
+      if (v && v.n) counts[v.n] = (counts[v.n]||0)+1;
+    });
+    var names = Object.keys(counts).sort(function (a,b) { return counts[b]-counts[a]; }).slice(0,12);
+    var s = names.map(function (n) { return n+counts[n]; }).join(',')+'|'+focusGem;
+    if (s === legendSig) return;
+    legendSig = s;
+    box.innerHTML = '';
+    if (!names.length) { box.innerHTML = '<span class="gp-empty">гемы ещё не найдены</span>'; return; }
+    names.forEach(function (n) {
+      var c = document.createElement('button');
+      c.className = 'gp-chip' + (focusGem === n ? ' on' : '');
+      c.type = 'button'; c.title = n + (RU_BY_EN[n] ? ' / '+RU_BY_EN[n] : '');
+      var i = document.createElement('i'); i.style.background = GEM_COLORS[n] || '#3A3A3A';
+      var t = document.createElement('span'); t.textContent = (settings.ru && RU_BY_EN[n] ? RU_BY_EN[n] : n).split(' ')[0];
+      var b = document.createElement('b'); b.textContent = counts[n];
+      c.appendChild(i); c.appendChild(t); c.appendChild(b);
+      c.addEventListener('click', function () { focusGem = focusGem === n ? null : n; legendSig=''; applyFocus(); buildLegend(); paintPanel(); });
+      box.appendChild(c);
+    });
+  }
   function paintPanel() {
     if (!panel) return;
-    panel.querySelector('#gem-w').value = settings.workers;
-    panel.querySelector('#gem-d').value = settings.delay;
-    panel.querySelector('#gem-p').checked = settings.prefetch;
-    panel.querySelector('#gem-pn').value = settings.prefetchPages;
-    panel.querySelector('#gem-wv').textContent = settings.workers;
-    panel.querySelector('#gem-dv').textContent = settings.delay;
-    panel.querySelector('#gem-pnv').textContent = settings.prefetchPages || 'все';
-    panel.querySelector('.rate').textContent = '~' + rate() + ' зап/с' + (brake?' (ТОРМОЗ)':'') + (userPaused?' (ПАУЗА)':'');
-    panel.querySelector('.stats').textContent = 'бейджей ' + document.querySelectorAll('.gem-badge').length +
-      ' | очередь ' + queue.length + ' | кэш ' + Object.keys(cache).length;
-    panel.querySelector('.stats2').textContent = 'фон: стр. ' + prefetchPage + ' | в фоне ' + bgQueue.length +
-      ' | скачано ' + bgDone + (prefetchRunning ? ' | идёт' : '');
-    panel.querySelector('[data-act=pause]').textContent = userPaused ? 'Продолжить' : 'Пауза';
-    panel.querySelector('[data-act=lang]').textContent = settings.ru ? 'RU' : 'EN';
+    var badges = document.querySelectorAll('.gem-badge').length;
+    var total = pageInfo.total || 0;
+    var st = prefetchRunning ? 'фон идёт' : (blockReason() || 'готов');
+    q('#gpRate').textContent = rate();
+    q('#gpState').textContent = st + (brake ? ' · тормоз' : '') + (userPaused ? ' · пауза' : '');
+    q('#gpState').className = 'gp-state' + (prefetchRunning ? ' live' : '');
+    q('#gpWv').textContent = settings.workers;
+    q('#gpDv').textContent = settings.delay;
+    q('#gpPv').textContent = settings.prefetchPages || 'все';
+    if (document.activeElement !== q('#gpW')) q('#gpW').value = settings.workers;
+    if (document.activeElement !== q('#gpD')) q('#gpD').value = settings.delay;
+    if (document.activeElement !== q('#gpP')) q('#gpP').value = settings.prefetchPages;
+    q('#gpAuto').checked = settings.prefetch;
+    var pct = total ? Math.min(100, Math.round((prefetchPage/total)*100)) : (badges ? Math.min(100, badges/Math.max(1,findCards().length)*100) : 0);
+    q('#gpBar').style.width = pct+'%';
+    q('#gpStats').innerHTML =
+      '<span><b>'+badges+'</b> бейджей</span><span><b>'+queue.length+'</b> очередь</span>'+
+      '<span><b>'+Object.keys(cache).length+'</b> кэш</span><span><b>'+bgDone+'</b> фон</span>'+
+      '<span><b>'+pageInfo.current+(total?'/'+total:'')+'</b> страница</span><span><b>'+bgQueue.length+'</b> в фоне</span>';
+    q('[data-act=pause]').textContent = userPaused ? 'Продолжить' : 'Пауза';
+    q('[data-act=lang]').textContent = settings.ru ? 'RU' : 'EN';
+    q('#gpPillN').textContent = badges;
+    q('#gpPillS').textContent = prefetchRunning ? ('фон '+(prefetchPage||pageInfo.current)+(total?'/'+total:'')) : (focusGem ? focusGem.split(' ')[0] : 'стр. '+pageInfo.current);
+    buildLegend();
   }
   function buildPanel() {
     if (!settings.panel || panel) return;
     panel = document.createElement('div');
-    panel.className = 'gem-panel';
+    panel.className = 'gem-panel' + (settings.open ? ' open' : '');
     panel.innerHTML =
-      '<div class="gem-panel-body">' +
-      '<label>Потоки: <b id="gem-wv"></b> (1-3)</label><input id="gem-w" type="range" min="1" max="3" step="1">' +
-      '<label>Пауза: <b id="gem-dv"></b> мс</label><input id="gem-d" type="range" min="250" max="2000" step="50">' +
-      '<label class="chk"><input id="gem-p" type="checkbox"> Автопроход страниц</label>' +
-      '<label>Вперёд на: <b id="gem-pnv"></b> стр.</label><input id="gem-pn" type="range" min="0" max="10" step="1">' +
-      '<div class="rate"></div><div class="stats"></div><div class="stats stats2"></div>' +
-      '<div class="row"><button class="act" data-act="pause"></button><button class="act" data-act="lang"></button></div>' +
-      '<div class="row"><button class="act" data-act="report">Отчёт</button><button class="act" data-act="clear">Сброс кэша</button></div>' +
-      '</div><button class="gem-panel-toggle" title="TB Gem Helper">&#9881;</button>';
+      '<div class="gp-card">'+
+        '<div class="gp-head">'+
+          '<svg class="gp-logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.6 22 8v8L12 22.4 2 16V8z" fill="none" stroke="url(#gpg)" stroke-width="1.4"/><path d="M12 5.4 18.4 9v6L12 18.6 5.6 15V9z" fill="url(#gpg)" opacity=".55"/><defs><linearGradient id="gpg" x1="0" y1="0" x2="24" y2="24"><stop offset="0" stop-color="#32ABDC"/><stop offset=".5" stop-color="#A1FF59"/><stop offset="1" stop-color="#D11FA1"/></linearGradient></defs></svg>'+
+          '<div class="gp-title"><b>TB GEM HELPER</b><span>призматические самоцветы</span></div>'+
+          '<button class="gp-x" type="button" title="Свернуть">&minus;</button>'+
+        '</div>'+
+        '<div class="gp-body">'+
+          '<div class="gp-meter"><div class="gp-rate"><b id="gpRate">0</b><span>зап/с</span></div><div class="gp-state" id="gpState">готов</div></div>'+
+          '<div class="gp-progress"><i id="gpBar"></i></div>'+
+          '<label class="gp-field"><span>Потоки <b id="gpWv">2</b> <em>/ 3</em></span><input id="gpW" type="range" min="1" max="3" step="1"></label>'+
+          '<label class="gp-field"><span>Пауза <b id="gpDv">350</b> <em>мс</em></span><input id="gpD" type="range" min="250" max="2000" step="50"></label>'+
+          '<label class="gp-field"><span>Вперёд <b id="gpPv">2</b> <em>стр. (0 = все)</em></span><input id="gpP" type="range" min="0" max="10" step="1"></label>'+
+          '<label class="gp-toggle"><input id="gpAuto" type="checkbox"><i></i><span>Автопроход страниц</span></label>'+
+          '<div class="gp-stats" id="gpStats"></div>'+
+          '<div class="gp-legendhead">Гемы на странице <em>клик — подсветить</em></div>'+
+          '<div class="gp-legend" id="gpLegend"></div>'+
+          '<div class="gp-actions">'+
+            '<button type="button" data-act="pause">Пауза</button>'+
+            '<button type="button" data-act="lang">EN</button>'+
+            '<button type="button" data-act="bgnow" class="accent">Фон сейчас</button>'+
+            '<button type="button" data-act="csv">CSV</button>'+
+            '<button type="button" data-act="diag">Диагноз</button>'+
+            '<button type="button" data-act="clear" class="danger">Сброс кэша</button>'+
+          '</div>'+
+        '</div>'+
+      '</div>'+
+      '<button class="gp-pill" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 21 8v8l-9 6-9-6V8z" fill="none" stroke="#32ABDC" stroke-width="1.6"/><path d="M12 6.5 17 9.6v4.8L12 17.5 7 14.4V9.6z" fill="#A1FF59" opacity=".7"/></svg><b id="gpPillN">0</b><span id="gpPillS">…</span></button>';
     document.body.appendChild(panel);
-    panel.querySelector('.gem-panel-toggle').addEventListener('click', function () { panel.classList.toggle('open'); paintPanel(); });
-    panel.querySelector('#gem-w').addEventListener('input', function () { setSpeed(+this.value, settings.delay); });
-    panel.querySelector('#gem-d').addEventListener('input', function () { setSpeed(settings.workers, +this.value); });
-    panel.querySelector('#gem-p').addEventListener('change', function () { setPrefetch(this.checked); });
-    panel.querySelector('#gem-pn').addEventListener('input', function () { setPrefetch(settings.prefetch, +this.value); });
+    function toggleOpen(v) {
+      settings.open = v; panel.classList.toggle('open', v); persist(); paintPanel();
+    }
+    q('.gp-pill').addEventListener('click', function () { toggleOpen(true); });
+    q('.gp-x').addEventListener('click', function () { toggleOpen(false); });
+    q('#gpW').addEventListener('input', function () { setSpeed(+this.value, settings.delay); });
+    q('#gpD').addEventListener('input', function () { setSpeed(settings.workers, +this.value); });
+    q('#gpP').addEventListener('input', function () { setPrefetch(settings.prefetch, +this.value); });
+    q('#gpAuto').addEventListener('change', function () { setPrefetch(this.checked); });
     panel.addEventListener('click', function (e) {
       var act = e.target.getAttribute && e.target.getAttribute('data-act');
-      if (act === 'pause') { userPaused = !userPaused; if (!userPaused) { pump(); maybePrefetch(); } paintPanel(); }
-      if (act === 'lang') { settings.ru = !settings.ru; persist(); refreshBadges(); paintPanel(); }
-      if (act === 'report') report();
-      if (act === 'clear') { cache = {}; bgSeen = {}; persist(); refreshBadges(); paintPanel(); }
+      if (act === 'pause') { userPaused = !userPaused; idleSince = 0; if (!userPaused) pump(); paintPanel(); }
+      if (act === 'lang') { settings.ru = !settings.ru; persist(); legendSig=''; refreshBadges(); }
+      if (act === 'bgnow') console.log('[gems] '+bgNow());
+      if (act === 'csv') console.log('[gems] '+exportCsv());
+      if (act === 'diag') diag();
+      if (act === 'clear') { cache = {}; bgSeen = {}; focusGem = null; legendSig=''; persist(); refreshBadges(); }
     });
-    setInterval(paintPanel, 1000); paintPanel();
+    setInterval(paintPanel, 1000);
+    paintPanel();
   }
 
   var scanTimer = null;
@@ -481,7 +747,7 @@
       var added = muts[i].addedNodes;
       for (var j=0;j<added.length;j++) {
         var n = added[j];
-        if (n.nodeType === 1 && !(n.classList && (n.classList.contains('gem-badge') || n.classList.contains('gem-panel')))) {
+        if (n.nodeType === 1 && !(n.classList && (n.classList.contains('gem-badge') || n.classList.contains('gem-panel') || n.classList.contains('gem-frame')))) {
           clearTimeout(scanTimer); scanTimer = setTimeout(processPage, 300); return;
         }
       }
@@ -489,16 +755,24 @@
   });
 
   loadAll().then(function () {
+    pageInfo = readPageInfo(document);
     buildPanel(); processPage();
     mo.observe(document.body, { childList:true, subtree:true });
+    setInterval(function () {
+      if (!settings.prefetch || prefetchRunning || userPaused || queue.length || active > 0) { idleSince = 0; return; }
+      if (!idleSince) { idleSince = Date.now(); return; }
+      if (Date.now()-idleSince >= 3000) { idleSince = 0; startPrefetch(); }
+    }, 1000);
     window.__gems = {
-      speed:setSpeed, prefetch:setPrefetch, report:report, refresh:refreshBadges, processPage:processPage,
-      findCards:findCards, extractGem:extractGem, limits:LIMITS,
-      state:function () { return { settings:settings, queue:queue.length, bg:bgQueue.length, bgDone:bgDone,
-        pages:prefetchPage, cache:Object.keys(cache).length, brake:brake, rate:rate() }; },
-      unknown:function () { return Object.keys(cache).filter(function (k) { return cache[k].u; }).map(function (k) { return cache[k].n; }); },
-      nextUrl:function () { return nextPageUrl(document, location.href); }
+      speed:setSpeed, prefetch:setPrefetch, bgNow:bgNow, diag:diag, report:report, csv:exportCsv,
+      refresh:refreshBadges, processPage:processPage, findCards:findCards, extractGem:extractGem, limits:LIMITS,
+      focus:function (n) { focusGem = n || null; legendSig=''; applyFocus(); buildLegend(); return focusGem; },
+      nextUrl:function () { return anchorNext(document, location.href); },
+      state:function () { return { settings:settings, page:pageInfo, queue:queue.length, bg:bgQueue.length,
+        bgDone:bgDone, bgPage:prefetchPage, running:prefetchRunning, block:blockReason(),
+        cache:Object.keys(cache).length, rate:rate() }; },
+      unknown:function () { return Object.keys(cache).filter(function (k) { return cache[k].u; }).map(function (k) { return cache[k].n; }); }
     };
-    console.log('[gems] v3.6 | кэш ' + Object.keys(cache).length + ' | ' + setSpeed() + ' | ' + setPrefetch());
+    console.log('[gems] v4.0 | кэш '+Object.keys(cache).length+' | стр. '+pageInfo.current+(pageInfo.total?' из '+pageInfo.total:'')+' | '+setSpeed());
   });
 })();
