@@ -1,15 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Dota2Market TB Gem Helper",
-  "version": "3.0",
-  "description": "Показывает гем внутри арканы Terrorblade",
-  "permissions": ["activeTab"],
+  "version": "3.5",
+  "description": "Prismatic gem badges for Terrorblade arcana on market.dota2.net",
+  "permissions": ["storage"],
   "host_permissions": ["*://market.dota2.net/*"],
   "content_scripts": [
-    {
-      "matches": ["*://market.dota2.net/*"],
-      "js": ["content.js"],
-      "css": ["styles.css"]
-    }
+    { "matches": ["*://market.dota2.net/*"], "js": ["content.js"], "css": ["styles.css"], "run_at": "document_idle" }
   ]
 }

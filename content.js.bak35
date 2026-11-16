@@ -1,0 +1,315 @@
+// content.js - TB Gem Helper v3.4 (RU-имена, цвет из HTML, постоянный кэш, 2 потока)
+(function () {
+  'use strict';
+
+  var GEM_COLORS = {
+    'Red': '#D03D33', 'Gold': '#CFAB31', 'Blue': '#0097CE', 'Purple': '#8232CF', 'Orange': '#D07733',
+    'Light Green': '#B7CF33', 'Deep Blue': '#3D68C4', 'Sea Green': '#4AB78D', 'Verdant Green': '#51B350',
+    'Deep Green': '#37864D', 'Bright Green': '#A1FF59', 'Bright Purple': '#8232ED', 'Placid Blue': '#94CAD0',
+    'Summer Warmth': '#FFEEBC', 'Defensive Red': '#FF4200', "Creator's Light": '#DCF2FF', 'Blossom Red': '#D76092',
+    'Crystalline Blue': '#1A3D85', 'Rubiline': '#D11FA1', 'Cursed Black': '#060606', 'Plague Grey': '#626E5B',
+    "Champion's Blue": '#507DFE', "Champion's Green": '#15A515', "Champion's Purple": '#7F48C3',
+    'Midas Gold': '#FFCA15', 'Earth Green': '#5AC355', 'Ember Flame': '#FFC604', 'Diretide Orange': '#F79D00',
+    'Dredge Earth': '#BDB76B', 'Dungeon Doom': '#7B68EE', "Tnim S'nnam": '#BCDDB3',
+    'Brusque Britches Beige': '#F0E68C', 'Unhallowed Ground': '#808000', 'Ships in the Night': '#191970',
+    'Miasmatic Grey': '#C0C0C0', 'Pristine Platinum': '#D5E3F5', 'Vermillion Renewal': '#CA0123',
+    "Reflection's Shade": '#FF3C28', 'Pyroclastic Flow': '#FF7832', 'Glacial Flow': '#32ABDC',
+    'Plushy Shag': '#FFC1DC', 'Explosive Burst': '#FFAF00',
+    'Light Blue': '#32A6CF', 'Magenta': '#C439C6', 'Persian': '#2924CB'
+  };
+
+  var RU_ALIASES = {
+    'Красный': 'Red', 'Золотой': 'Gold', 'Синий': 'Blue', 'Фиолетовый': 'Purple', 'Оранжевый': 'Orange',
+    'Светло-зеленый': 'Light Green', 'Глубокий синий': 'Deep Blue', 'Сине-зеленый': 'Sea Green',
+    'Зеленая сосна': 'Verdant Green', 'Глубокий зеленый': 'Deep Green', 'Ярко-зеленый': 'Bright Green',
+    'Ярко-фиолетовый': 'Bright Purple', 'Спокойный синий': 'Placid Blue', 'Летнее тепло': 'Summer Warmth',
+    'Сдержанно-красный': 'Defensive Red', 'Свет создателя': "Creator's Light", 'Аленький цветочек': 'Blossom Red',
+    'Синий кристалл': 'Crystalline Blue', 'Отталкивающий черный': 'Cursed Black', 'Чумной серый': 'Plague Grey',
+    'Чемпионский синий': "Champion's Blue", 'Чемпионский зеленый': "Champion's Green",
+    'Чемпионский фиолетовый': "Champion's Purple", 'Золото Мидаса': 'Midas Gold',
+    'Зеленая планета': 'Earth Green', 'Тлеющее пламя': 'Ember Flame'
+  };
+
+  var LABEL_RE = /(?:Prismatic\s*Gem|Призматический\s*самоцвет)/i;
+  var LABEL_ONLY_RE = /^\s*(?:Prismatic\s*Gem|Призматический\s*самоцвет)\s*$/i;
+  var LEGACY_RE = /Legacy\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)/i;
+  var TARGET_RE = /Fractal Horns of Inner Abysm|Prismatic\s*:|Призматический\s*:/i;
+  var IMG_SEL = '.image, .img, .item-image, [style*="background-image"], img';
+
+  var BADGE_LANG = 'en';          // 'ru' = показывать русские названия на бейджах
+  var CACHE_KEY = 'tbGemCacheV2';
+  var TTL = 14 * 24 * 3600 * 1000;
+  var WORKERS = 2, DELAY = 350, JITTER = 250, PAUSE = 45000;
+
+  var queue = [], active = 0, pausedUntil = 0, okStreak = 0, done = 0;
+  var cache = {}, saveTimer = null;
+
+  function norm(s) {
+    return (s || '').replace(/[\u2019\u2018]/g, "'").replace(/\u0451/g, '\u0435').replace(/\u0401/g, '\u0415')
+                    .replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  var LOOKUP = {}, RU_BY_EN = {};
+  Object.keys(GEM_COLORS).forEach(function (n) { LOOKUP[norm(n)] = n; });
+  Object.keys(RU_ALIASES).forEach(function (n) { LOOKUP[norm(n)] = RU_ALIASES[n]; RU_BY_EN[RU_ALIASES[n]] = n; });
+  var ALIAS_KEYS = Object.keys(LOOKUP).sort(function (a, b) { return b.length - a.length; });
+
+  function hex2(n) { return ('0' + Math.max(0, Math.min(255, n | 0)).toString(16)).slice(-2); }
+  function toHex(raw) {
+    if (!raw) return null;
+    raw = String(raw).trim();
+    var m = raw.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (m) { var h = m[1]; if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2]; return '#' + h.toUpperCase(); }
+    m = raw.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+    return m ? ('#' + hex2(+m[1]) + hex2(+m[2]) + hex2(+m[3])).toUpperCase() : null;
+  }
+  function readColor(el) {
+    if (!el || el.nodeType !== 1) return null;
+    var raw = el.getAttribute('color') || (el.style && el.style.color) || '';
+    if (!raw && el.parentElement) raw = el.parentElement.getAttribute('color') || (el.parentElement.style && el.parentElement.style.color) || '';
+    return toHex(raw);
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function keyOf(u) { var m = u.match(/\/item\/(\d+)-(\d+)/); return m ? m[1] + '_' + m[2] : u; }
+  function has(k) { return Object.prototype.hasOwnProperty.call(cache, k); }
+
+  async function loadCache() {
+    try {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        var obj = await chrome.storage.local.get(CACHE_KEY);
+        cache = (obj && obj[CACHE_KEY]) || {};
+      } else {
+        cache = JSON.parse(sessionStorage.getItem(CACHE_KEY) || '{}');
+      }
+    } catch (e) { cache = {}; }
+    var cut = Date.now() - TTL;
+    Object.keys(cache).forEach(function (k) { var v = cache[k]; if (!v || !v.t || v.t < cut) delete cache[k]; });
+  }
+  function persist() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+          var o = {}; o[CACHE_KEY] = cache; chrome.storage.local.set(o);
+        } else { sessionStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
+      } catch (e) {}
+    }, 400);
+  }
+
+  function parseByDictionary(text) {
+    var t = norm(text), m = t.match(LABEL_RE);
+    if (!m) return null;
+    var win = t.slice(Math.max(0, m.index - 60), m.index);
+    var best = null, bestEnd = -1;
+    for (var i = 0; i < ALIAS_KEYS.length; i++) {
+      var k = ALIAS_KEYS[i], p = win.lastIndexOf(k);
+      if (p < 0) continue;
+      if (p + k.length > bestEnd) { bestEnd = p + k.length; best = LOOKUP[k]; }
+    }
+    return best ? { name: best, color: GEM_COLORS[best] } : null;
+  }
+
+  function htmlColorFor(descr, name) {
+    var needle = norm(name), els = descr.querySelectorAll('font[color], [style*="color"]');
+    for (var i = 0; i < els.length; i++) {
+      var t = norm(els[i].textContent);
+      if (t.length < 3) continue;
+      if (t.indexOf(needle) !== -1 || needle.indexOf(t) !== -1) { var c = readColor(els[i]); if (c) return c; }
+    }
+    return null;
+  }
+
+  function nameFromDom(descr) {
+    var els = descr.querySelectorAll('*'), lim = Math.min(els.length, 2000);
+    for (var i = 0; i < lim; i++) {
+      var el = els[i];
+      if (el.children.length) continue;
+      var t = (el.textContent || '').trim();
+      if (!LABEL_ONLY_RE.test(t)) continue;
+      var prev = el.previousSibling;
+      while (prev && !(prev.textContent || '').trim()) prev = prev.previousSibling;
+      if (!prev) continue;
+      var name = (prev.textContent || '').trim();
+      if (!name || name.length > 40) continue;
+      var pe = prev.nodeType === 1 ? prev : prev.parentElement;
+      return { name: name, color: readColor(pe) || readColor(el) };
+    }
+    return null;
+  }
+
+  function tailBeforeLabel(text) {
+    var t = (text || '').replace(/\s+/g, ' '), m = t.match(LABEL_RE);
+    if (!m) return null;
+    var win = t.slice(Math.max(0, m.index - 80), m.index).split(/[.;:!?()\d]/).pop().trim();
+    return (win.length >= 3 && win.length <= 40) ? win : null;
+  }
+
+  function extractGem(descr) {
+    var text = descr.textContent || '';
+    var lg = text.match(LEGACY_RE);
+    if (lg) return { name: 'Legacy ' + lg[1] + ',' + lg[2] + ',' + lg[3],
+                     color: ('#' + hex2(+lg[1]) + hex2(+lg[2]) + hex2(+lg[3])).toUpperCase() };
+    var hit = parseByDictionary(text);
+    if (hit) return { name: hit.name, color: htmlColorFor(descr, hit.name) || hit.color };
+    var dom = nameFromDom(descr);
+    if (dom) {
+      var canon = LOOKUP[norm(dom.name)];
+      return { name: canon || dom.name, color: dom.color || GEM_COLORS[canon] || '#3A3A3A', unknown: !canon };
+    }
+    var raw = tailBeforeLabel(text);
+    if (raw) return { name: raw, color: '#3A3A3A', unknown: true };
+    return null;
+  }
+
+  function textColor(hex) {
+    var r = parseInt(hex.substr(1, 2), 16), g = parseInt(hex.substr(3, 2), 16), b = parseInt(hex.substr(5, 2), 16);
+    return (r * 299 + g * 587 + b * 114) / 1000 > 150 ? '#111111' : '#ffffff';
+  }
+  function imageBox(card) {
+    var box = card.querySelector(IMG_SEL);
+    if (box && box.tagName === 'IMG' && box.parentElement) box = box.parentElement;
+    if (!box) {
+      var p = card.parentElement;
+      if (p && p.querySelectorAll('a[href*="/item/"]').length === 1) box = p.querySelector(IMG_SEL);
+    }
+    return box || card;
+  }
+  function addBadge(card, gem) {
+    if (!card || !gem || !gem.name || card.querySelector('.gem-badge')) return;
+    var host = imageBox(card);
+    if (host.querySelector('.gem-badge')) return;
+    var cs = getComputedStyle(host);
+    if (cs.display === 'inline') host.style.display = 'inline-block';
+    if (cs.position === 'static') host.style.position = 'relative';
+    var b = document.createElement('div');
+    b.className = 'gem-badge' + (gem.unknown ? ' gem-badge-unknown' : '');
+    b.style.backgroundColor = gem.color || '#3A3A3A';
+    b.style.color = textColor(gem.color || '#3A3A3A');
+    b.title = gem.name + (RU_BY_EN[gem.name] ? ' / ' + RU_BY_EN[gem.name] : '') + (gem.unknown ? ' (нет в словаре)' : '');
+    b.textContent = (BADGE_LANG === 'ru' && RU_BY_EN[gem.name]) ? RU_BY_EN[gem.name] : gem.name;
+    host.appendChild(b);
+  }
+
+  function findCards() {
+    var seen = {}, out = [];
+    var nodes = document.querySelectorAll('a.item, .market-items .item, a[href*="/item/"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var a = (el.tagName === 'A' && el.href && el.href.indexOf('/item/') !== -1) ? el : el.querySelector('a[href*="/item/"]');
+      if (!a) continue;
+      if (!(/(^|\s)item(\s|$)/.test(el.className || '') || el.querySelector(IMG_SEL))) continue;
+      var href = a.href.split('#')[0];
+      if (seen[href]) continue;
+      seen[href] = 1; el.dataset.gemUrl = href; out.push(el);
+    }
+    return out;
+  }
+  function isTarget(el) {
+    var href = decodeURIComponent(el.dataset.gemUrl || '').replace(/\+/g, ' ');
+    return TARGET_RE.test(el.textContent || '') || TARGET_RE.test(href);
+  }
+  function gemFromCache(v) { return v && v.n ? { name: v.n, color: v.c, unknown: !!v.u } : null; }
+
+  async function fetchGem(url) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 15000);
+    var res;
+    try { res = await fetch(url, { credentials: 'same-origin', signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+    if (res.status === 429 || res.status === 503 || res.status === 403) {
+      var e = new Error('rate limited ' + res.status); e.rate = true; throw e;
+    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    var doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    return extractGem(doc.querySelector('#descr') || doc.body);
+  }
+
+  function pump() {
+    while (active < WORKERS && queue.length && Date.now() >= pausedUntil) { active++; runWorker(); }
+    if (queue.length && Date.now() < pausedUntil) setTimeout(pump, pausedUntil - Date.now() + 200);
+  }
+
+  async function runWorker() {
+    try {
+      while (queue.length) {
+        if (Date.now() < pausedUntil) break;
+        var card = queue.shift();
+        if (!card || !card.isConnected) continue;
+        var url = card.dataset.gemUrl;
+        if (!url) continue;
+        var key = keyOf(url);
+        if (has(key)) { addBadge(card, gemFromCache(cache[key])); card.dataset.gemState = 'done'; continue; }
+        await sleep(DELAY + Math.random() * JITTER);
+        var gem = null;
+        try { gem = await fetchGem(url); }
+        catch (err) {
+          if (err.rate) {
+            queue.unshift(card);
+            pausedUntil = Date.now() + PAUSE;
+            WORKERS = 1; DELAY = Math.min(2000, DELAY * 2); okStreak = 0;
+            console.warn('[gems] лимит ' + err.message + ' - пауза 45с, снижаю скорость');
+            break;
+          }
+          console.warn('[gems] ошибка', err.message, url);
+          card.dataset.gemState = 'error';
+          continue;
+        }
+        cache[key] = { n: gem ? gem.name : null, c: gem ? gem.color : null, u: gem && gem.unknown ? 1 : 0, t: Date.now() };
+        persist();
+        if (gem) {
+          addBadge(card, gem);
+          if (gem.unknown) console.warn('[gems] неизвестный гем: "' + gem.name + '" - пришли мне это имя');
+        }
+        card.dataset.gemState = 'done';
+        done++; okStreak++;
+        if (okStreak === 25 && WORKERS === 1) { WORKERS = 2; DELAY = 350; console.log('[gems] скорость восстановлена'); }
+        console.log('[gems] ' + done + ' | ' + (gem ? gem.name : 'без гема') + ' | осталось ' + queue.length);
+      }
+    } finally { active--; if (queue.length) pump(); }
+  }
+
+  function processPage() {
+    var descr = document.querySelector('#descr');
+    if (descr) {
+      var g = extractGem(descr), pic = document.querySelector('.ip-pic');
+      if (g && pic) addBadge(pic, g);
+    }
+    var front = [], back = [], vh = window.innerHeight || 800, cards = findCards();
+    cards.forEach(function (el) {
+      if (el.dataset.gemState) return;
+      if (!isTarget(el)) { el.dataset.gemState = 'skip'; return; }
+      var key = keyOf(el.dataset.gemUrl);
+      if (has(key)) { addBadge(el, gemFromCache(cache[key])); el.dataset.gemState = 'done'; return; }
+      el.dataset.gemState = 'queued';
+      if (el.getBoundingClientRect().top < vh) front.push(el); else back.push(el);
+    });
+    if (front.length || back.length) {
+      queue = front.concat(queue, back);
+      console.log('[gems] карточек: ' + cards.length + ' | в очередь: ' + (front.length + back.length) + ' (видимых ' + front.length + ')');
+    }
+    pump();
+  }
+
+  var scanTimer = null;
+  var mo = new MutationObserver(function (muts) {
+    for (var i = 0; i < muts.length; i++) {
+      var added = muts[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var n = added[j];
+        if (n.nodeType === 1 && !(n.classList && n.classList.contains('gem-badge'))) {
+          clearTimeout(scanTimer); scanTimer = setTimeout(processPage, 300); return;
+        }
+      }
+    }
+  });
+
+  loadCache().then(function () {
+    processPage();
+    mo.observe(document.body, { childList: true, subtree: true });
+    window.__gems = {
+      cache: cache, queue: queue, findCards: findCards, extractGem: extractGem, processPage: processPage,
+      speed: function (w, d) { WORKERS = w; DELAY = d; pump(); return 'потоков ' + w + ', задержка ' + d; },
+      unknown: function () { return Object.keys(cache).filter(function (k) { return cache[k].u; }).map(function (k) { return cache[k].n; }); }
+    };
+    console.log('[gems] v3.4 | кэш: ' + Object.keys(cache).length + ' | потоков: ' + WORKERS);
+  });
+})();

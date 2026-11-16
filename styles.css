@@ -1,22 +1,26 @@
 .gem-badge {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    font-size: 10px; /* Чуть уменьшили шрифт */
-    font-weight: 900;
-    padding: 2px 4px;
-    border-radius: 3px;
-    z-index: 100;
-    text-shadow: 1px 1px 1px rgba(0,0,0,0.9);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
-    border: 1px solid #fff;
-    font-family: Arial, sans-serif;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    text-align: center;
-    line-height: 1.1;
-    max-width: 100px; /* Ограничиваем ширину */
-    white-space: nowrap; /* Запрещаем перенос строк */
-    overflow: hidden; /* Скрываем лишнее */
-    text-overflow: ellipsis; /* Добавляем троеточие (...) */
+  position: absolute; top: 2px; left: 2px;
+  max-width: calc(100% - 4px);
+  padding: 2px 4px; border-radius: 3px;
+  font: 900 10px/1.1 Arial, sans-serif;
+  letter-spacing: .4px; text-transform: uppercase; text-align: center;
+  border: 1px solid rgba(255,255,255,.75);
+  box-shadow: 0 1px 3px rgba(0,0,0,.6);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none; z-index: 20;
 }
+.gem-badge-unknown { border: 1px dashed #ffcc00; }
+
+.gem-panel { position: fixed; left: 12px; bottom: 12px; z-index: 99999; font: 12px/1.4 Arial, sans-serif; color: #eee; }
+.gem-panel * { box-sizing: border-box; }
+.gem-panel-toggle { width: 34px; height: 34px; border-radius: 50%; border: 1px solid #555; background: #1f1f1f; color: #ffcc00; font-size: 16px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.6); }
+.gem-panel-body { display: none; margin-bottom: 8px; width: 240px; padding: 10px; border: 1px solid #555; border-radius: 8px; background: rgba(18,18,18,.96); box-shadow: 0 4px 16px rgba(0,0,0,.7); }
+.gem-panel.open .gem-panel-body { display: block; }
+.gem-panel label { display: block; margin: 6px 0 2px; font-size: 11px; color: #bbb; }
+.gem-panel label.chk { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: #ddd; }
+.gem-panel input[type=range] { width: 100%; }
+.gem-panel .rate { margin-top: 8px; color: #7fd67f; font-weight: 700; }
+.gem-panel .stats { color: #999; font-size: 11px; margin-top: 2px; }
+.gem-panel .row { display: flex; gap: 6px; margin-top: 6px; }
+.gem-panel button.act { flex: 1; padding: 4px 6px; font-size: 11px; border: 1px solid #555; border-radius: 4px; background: #2b2b2b; color: #eee; cursor: pointer; }
+.gem-panel button.act:hover { background: #3a3a3a; }
