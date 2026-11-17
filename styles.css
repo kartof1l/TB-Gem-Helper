@@ -190,3 +190,13 @@
  border:1px solid var(--ln);color:#8A97AF;font:10px/1.45 Consolas,monospace;white-space:pre-wrap;word-break:break-word}
 .dl-out::-webkit-scrollbar{width:7px}
 .dl-out::-webkit-scrollbar-thumb{border-radius:7px;background:#22334A}
+
+/* compact v2 */
+.gem-badge{max-width:56% !important;font-size:9px !important;padding:1px 4px !important;top:2px !important;left:2px !important}
+.steam-tag{max-width:38% !important;padding:1px 4px !important;top:2px !important;right:2px !important;
+ flex-direction:row !important;line-height:1.1 !important;border-radius:3px !important}
+.steam-tag b{font-size:8px !important;font-weight:800}
+.steam-tag u{display:none !important}
+.deal-tag{max-width:44% !important;padding:1px 4px !important;bottom:2px !important;right:2px !important}
+.deal-tag b{font-size:8px !important}
+.deal-tag u{font-size:7px !important}
