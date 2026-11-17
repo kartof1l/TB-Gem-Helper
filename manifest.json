@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Dota2Market TB Gem Helper",
-  "version": "4.0",
-  "description": "Prismatic gem badges for Terrorblade arcana on market.dota2.net",
+  "version": "5.0",
+  "description": "Gem badges, market median and Steam buy-order floor for Terrorblade arcana",
   "permissions": ["storage"],
-  "host_permissions": ["*://market.dota2.net/*"],
+  "host_permissions": ["*://market.dota2.net/*", "*://steamcommunity.com/*"],
+  "background": { "service_worker": "background.js" },
   "content_scripts": [
-    { "matches": ["*://market.dota2.net/*"], "js": ["content.js"], "css": ["styles.css"], "run_at": "document_idle" }
+    { "matches": ["*://market.dota2.net/*"], "js": ["content.js", "valuation.js", "steam.js"], "css": ["styles.css"], "run_at": "document_idle" }
   ]
 }

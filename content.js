@@ -284,7 +284,7 @@
       if (!href || seen[href]) continue;
       seen[href] = 1;
       var name = (el.textContent||'')+' '+decodeURIComponent(href).replace(/\+/g,' ');
-      if (TARGET_RE.test(name)) out.push(href);
+      if (TARGET_RE.test(name)) { out.push(href); if (window.__deals && window.__deals.ingest) window.__deals.ingest(href, el.textContent); }
     }
     return out;
   }
@@ -764,6 +764,8 @@
       if (Date.now()-idleSince >= 3000) { idleSince = 0; startPrefetch(); }
     }, 1000);
     window.__gems = {
+      cacheNow:function () { return cache; }, keyOf:keyOf, compact:compact, colors:GEM_COLORS, ruByEn:RU_BY_EN,
+      cacheNow:function () { return cache; }, keyOf:keyOf, compact:compact, colors:GEM_COLORS, ruByEn:RU_BY_EN,
       speed:setSpeed, prefetch:setPrefetch, bgNow:bgNow, diag:diag, report:report, csv:exportCsv,
       refresh:refreshBadges, processPage:processPage, findCards:findCards, extractGem:extractGem, limits:LIMITS,
       focus:function (n) { focusGem = n || null; legendSig=''; applyFocus(); buildLegend(); return focusGem; },
